@@ -9,7 +9,21 @@ st.title("Cold Chain IoT — Simulación guiada (end-to-end, sin archivos)")
 
 # ---------- Utilidades ----------
 def canon(obj) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """JSON canónico seguro para hashing. Convierte Timestamps/NumPy a tipos nativos/strings."""
+    def _default(o):
+        # pandas.Timestamp o datetime -> ISO 8601
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        # NumPy/Pandas escalares -> tipos Python nativos
+        try:
+            import numpy as np
+            if isinstance(o, (np.generic,)):
+                return o.item()
+        except Exception:
+            pass
+        # Fallback genérico
+        return str(o)
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=_default)
 
 def merkle_root(leaves: list[str]) -> str:
     if not leaves:
@@ -133,8 +147,11 @@ def build_epochs_from_df(df, epoch_seconds=60):
     start = dfx["ts_dt"].iloc[0]
     bucket = []
 
+    # Solo claves del contrato (evita columnas auxiliares como ts_dt, _valid, _reason, etc.)
+    ALLOWED = {"device_id","ts","temperature_c","humidity","gps","truck_id","shipment_id"}
+
     def flush(ep_start, items, prev):
-        leaves = [canon({k:v for k,v in r.items() if not k.startswith("_")}) for r in items]
+        leaves = [canon({k: v for k, v in r.items() if k in ALLOWED}) for r in items]
         root = merkle_root(leaves)
         return {
             "epoch_id": ep_start.isoformat(),
@@ -161,10 +178,12 @@ def verify_epochs(df, epochs_df):
     if epochs_df.empty:
         return "OK", None, None
     prev = "0"*64
+    ALLOWED = {"device_id","ts","temperature_c","humidity","gps","truck_id","shipment_id"}
+
     for _, ep in epochs_df.iterrows():
         start = pd.to_datetime(ep["start_ts"]); end = pd.to_datetime(ep["end_ts"])
         bucket = df[(pd.to_datetime(df["ts"])>=start) & (pd.to_datetime(df["ts"])<=end)]
-        leaves = [canon({k:v for k,v in r.items() if not k.startswith("_")}) for _,r in bucket.iterrows()]
+        leaves = [canon({k: v for k, v in r.items() if k in ALLOWED}) for _, r in bucket.iterrows()]
         calc = merkle_root(leaves) if len(leaves)>0 else "0"*64
         if calc != ep["merkle_root"]:
             return "FAIL", ep["epoch_id"], "merkle_mismatch"
@@ -286,3 +305,4 @@ if c3.button("Romper integridad (tamper)"):
         old = df.sample(1, random_state=2).index[0]
         st.session_state.df.loc[old, "temperature_c"] = float(st.session_state.df.loc[old, "temperature_c"]) + 5.5
         st.info("Dato manipulado. Repite el paso 4 (Epochs + Verificar).")
+
